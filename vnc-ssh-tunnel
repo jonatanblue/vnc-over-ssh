@@ -36,7 +36,7 @@ print_help_message() {
 
 main() {
   local server user_input password_file_path vnc_port
-  password_file_path="~/.vncpassword"
+  password_file_path="${HOME}/.vncpassword"
   vnc_port="5901"
   server="${1?Must provide server IP/hostname}"; shift 1
 
