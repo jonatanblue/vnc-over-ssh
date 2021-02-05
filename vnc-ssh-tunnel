@@ -42,6 +42,7 @@ main() {
 
   if [[ ! -r "${password_file_path}" ]]; then
     echo "Password file ${password_file_path} not found. You should copy it from ~/.vncpasswd on the VNC server."
+    exit 1
   fi
 
   if ssh "${server}" "ps aux | grep vnc" | grep Xtightvnc; then
