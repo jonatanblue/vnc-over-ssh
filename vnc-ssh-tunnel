@@ -1,0 +1,77 @@
+#!/bin/bash
+#
+# VNC over SSH from Mac OS X to Ubuntu
+#
+
+set -o pipefail -o errtrace -o errexit -o nounset
+
+[[ -n "${TRACE:-}" ]] && set -o xtrace
+
+trap 'stacktrace "Error trapped rc=${PIPESTATUS[@]}, see trace above"' ERR
+trap cleanup_background_processes EXIT
+
+stacktrace() {
+  local frame="${#FUNCNAME[@]}"
+  echo >&2 "Stacktrace:"
+  while [[ "${frame}" -gt 1 ]]; do
+    ((frame--))
+    echo >&2 "  File ${BASH_SOURCE[$frame]}#L${BASH_LINENO[$((frame - 1))]} (in ${FUNCNAME[$frame]}())"
+  done
+  if [[ "$#" -gt 0 ]]; then
+    echo >&2 "$1"
+  fi
+}
+
+cleanup_background_processes() {
+  local pid
+  for pid in $(jobs -p); do
+    echo >&2 "Stopping process ${pid}"
+    kill ${pid}
+  done
+}
+
+print_help_message() {
+  echo "Enter q to quit"
+}
+
+main() {
+  local server user_input password_file_path vnc_port
+  password_file_path="~/.vncpassword"
+  vnc_port="5901"
+  server="${1?Must provide server IP/hostname}"; shift 1
+
+  if [[ ! -r "${password_file_path}" ]]; then
+    echo "Password file ${password_file_path} not found. You should copy it from ~/.vncpasswd on the VNC server."
+  fi
+
+  if ssh "${server}" "ps aux | grep vnc" | grep Xtightvnc; then
+    echo "VNC server already running"
+  else
+    echo "Starting VNC server"
+    ssh "${server}" vncserver -geometry 1680x1050 :1
+  fi
+
+  echo "Opening SSH tunnel to ${server}"
+
+  ssh -L "${vnc_port}:localhost:${vnc_port}" -C -N -v "${server}" &
+
+  while ! nc -z localhost "${vnc_port}"; do
+    sleep 0.1 # wait for 1/10 of the second before check again
+  done
+
+  # The password file is a copy of ~/.vncpasswd on the server.
+  /Applications/VNC\ Viewer.app/Contents/MacOS/vncviewer -passwd "${password_file_path}" "localhost:${vnc_port}" &
+
+  print_help_message
+
+  read user_input
+
+  while [[ "${user_input}" != "q" ]]; do
+    print_help_message
+    read user_input
+  done
+
+  cleanup_background_processes
+}
+
+main "${@}"
