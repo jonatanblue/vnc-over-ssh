@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# VNC over SSH from Mac OS X to Ubuntu
+# VNC over SSH from Mac OS X to Ubuntu VM in AWS EC2
 #
 
 set -o pipefail -o errtrace -o errexit -o nounset
@@ -31,30 +31,97 @@ cleanup_background_processes() {
 }
 
 print_help_message() {
-  echo "Enter q to quit"
+  echo >&2 "Enter q to quit"
+}
+
+get_instance_state() {
+  local instance_id aws_profile aws_region
+  aws_profile="${1}"; shift
+  aws_region="${1}"; shift
+  instance_id="${1}"; shift
+  aws --profile "${aws_profile}" ec2 --region "${aws_region}" describe-instances --instance-ids "${instance_id}" --query 'Reservations[*].Instances[*].State.Name' --output text
+}
+
+get_instance_ip() {
+  local instance_id aws_profile aws_region
+  aws_profile="${1}"; shift
+  aws_region="${1}"; shift
+  instance_id="${1}"; shift
+  aws --profile "${aws_profile}" ec2 --region "${aws_region}" describe-instances --instance-ids "${instance_id}" --query 'Reservations[*].Instances[*].PublicIpAddress' --output text
+}
+
+instance_is_running() {
+  local instance_id aws_profile aws_region instance_state instance_ip
+  aws_profile="${1}"; shift
+  aws_region="${1}"; shift
+  instance_id="${1}"; shift
+  instance_state="$(get_instance_state "${aws_profile}" "${aws_region}" "${instance_id}")"
+  if [[ "${instance_state}" == "running" ]]; then
+    # Check that the API is also returning a public IP address
+    instance_ip="$(get_instance_ip "${aws_profile}" "${aws_region}" "${instance_id}")"
+    if grep -q -e "^[0-9]\+\.[0-9]\+\.[0-9]\+\.[0-9]\+$" <<< "${instance_ip}"; then
+      return 0
+    fi
+  fi
+  return 1
+}
+
+ensure_vm_started() {
+  local instance_id aws_profile aws_region instance_state
+  aws_profile="${1}"; shift
+  aws_region="${1}"; shift
+  instance_id="${1}"; shift
+  instance_state="$(get_instance_state "${aws_profile}" "${aws_region}" "${instance_id}")"
+
+  if instance_is_running "${aws_profile}" "${aws_region}" "${instance_id}"; then
+    echo >&2 "VM is running"
+    get_instance_ip "${aws_profile}" "${aws_region}" "${instance_id}"
+  elif [[ "${instance_state}" == "stopped" ]]; then
+    echo >&2 "VM is stopped. Starting VM..."
+    aws --profile "${aws_profile}" ec2 --region "${aws_region}" start-instances --instance-ids "${instance_id}" 1>&2
+    echo >&2 "VM started"
+    while ! instance_is_running "${aws_profile}" "${aws_region}" "${instance_id}"; do
+      echo >&2 "Waiting for VM to be running"
+      sleep 1
+    done
+    echo >&2 "VM running"
+    get_instance_ip "${aws_profile}" "${aws_region}" "${instance_id}"
+  else
+    echo >&2 "Unhandled instance state: ${instance_state}"
+    exit 1
+  fi
 }
 
 main() {
-  local server user_input password_file_path vnc_port
+  local server_ip aws_profile aws_region instance_id user_input password_file_path vnc_port
   password_file_path="${HOME}/.vncpassword"
   vnc_port="5901"
-  server="${1?Must provide server IP/hostname}"; shift 1
+  aws_profile="${1?Must provide AWS profile name}"; shift 1
+  aws_region="${1?Must provide AWS region}"; shift 1
+  instance_id="${1?Must provide EC2 instance ID}"; shift 1
 
   if [[ ! -r "${password_file_path}" ]]; then
-    echo "Password file ${password_file_path} not found. You should copy it from ~/.vncpasswd on the VNC server."
+    echo >&2 "Password file ${password_file_path} not found. You should copy it from ~/.vncpasswd on the VNC server."
     exit 1
   fi
 
-  if ssh "${server}" "ps aux | grep vnc" | grep Xtightvnc; then
-    echo "VNC server already running"
+  server_ip="$(ensure_vm_started "${aws_profile}" "${aws_region}" "${instance_id}")"
+  echo >&2 "Waiting for SSH"
+  while ! nc -z "${server_ip}" 22; do
+    sleep 0.1 # wait for 1/10 of the second before check again
+  done
+  echo >&2 "SSH is running"
+
+  if ssh "${server_ip}" "ps aux | grep vnc" | grep Xtightvnc; then
+    echo >&2 "VNC server_ip already running"
   else
-    echo "Starting VNC server"
-    ssh "${server}" vncserver -geometry 1680x1050 :1
+    echo >&2 "Starting VNC server"
+    ssh "${server_ip}" vncserver -geometry 1680x1050 :1
   fi
 
-  echo "Opening SSH tunnel to ${server}"
+  echo >&2 "Opening SSH tunnel to ${server_ip}"
 
-  ssh -L "${vnc_port}:localhost:${vnc_port}" -C -N -v "${server}" &
+  ssh -L "${vnc_port}:localhost:${vnc_port}" -C -N -v "${server_ip}" &
 
   while ! nc -z localhost "${vnc_port}"; do
     sleep 0.1 # wait for 1/10 of the second before check again
